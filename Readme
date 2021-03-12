@@ -1,0 +1,196 @@
+331CC - Serban Sorohan
+
+
+Tehnologii folosite:
+	- C++
+	- MPI
+	- Pthreads (+ POSIX semaphores)
+
+
+Fisiere:
+	- "contants.h" -> contine valori constante si definitia a 2 structuri, toate fiind folosite in cadrul temei.
+
+	- "processing.cpp" si "processing.h" -> contine metodele de prelucrare a paragrafelor in functie de gen.
+											Functii:
+												- processing_horror()
+												- processing_comedy()
+												- processing_fantasy()
+												- processing_science_fiction()
+
+	- "MPI_workers.cpp" si "MPI_workers.h" -> contine metoda "MPI_workers_main" apelata de fiecare nod worker (pentru
+											  fiecare gen in parte) si metoda "workers_thread_func" apelata de fiecare
+											  fir de executie creat de un nod worker.
+											  Functii:
+											  	- MPI_workers_main()
+												- workers_thread_func()
+
+	- "main.cpp" -> contine functia "main" ce se ocupa de creearea nodurilor de MPI si de afisarea paragrafelor dupa
+					procesare (de catre nodul MASTER), si metoda "master_thread_funct" apelata de fiecare fir de 
+					executie creat de nodul MASTER care se ocupa ce citirea din fisier si trimiterea paragrafelor 
+					catre workeri.
+					Functii:
+						- main()
+						- master_thread_funct()
+
+
+Detalii de implementare:
+	- Pentru firele de executie pornite de nodurile workers de tip MPI, am folosit modelul replicated workers. Se 
+	  pornesc toate cele NR_MAX_THREADS, thread-urile care proceseaza datele (workers) astepta la un semafor pana apare
+	  un job. Cand apare un job, un thread worker aleator este selectat pentru procesarea datelor.
+	- Modelul producator-consumator, este prezent tot de catre firele de executie pornite de nodurile workers de 
+	  tip MPI. Astfel, firul care se ocupa de receptarea datelor de la master este producator, iar firele care 
+	  proceseaza datele sunt consumatori.
+	- Modelul producator-consumator este implementat pentru versiunea cu buffer infinit. Nu am gasit un mod usor
+	  de a verifica daca o coada este plina in c++ :( pentru a implemente versiunea cu buffer finit, asa ca am facut doar
+	  o implementare teoretica pe care am comentat-o.
+
+
+- Fluxul programului se poate urmari aici, sau direct in fisierele .cpp, urmarindu-se comentariile din cod.
+- Modelul in care este prezentat in Readme este: (functie) - ce se intampla in functie
+
+Fluxul programului:
+	(main) - Se creeaza cele 5 noduri de MPI, 1 nod de tip master si restul de tip worker.
+	(main) - Pe nodul master se creeaza, folosing pthreads, 4 fire de executie pentru procesarea fisierului de intrare
+			 in paralel si pentru a comunica cu workerii in paralel (cate un fir de executie pentru fiecare worker).
+
+	(master_thread_funct) - Fiecare fir de executie deschide fisierul primit, si incepe sa il parcurga linie cu linie.
+							In momentul in care thread-ul ajunge la linia ce contine genul paragrafului caruia i-a fost
+							alocat (ex: thread-ul corespunzator genului horror ajunge la linia "horror"), acesta incepe
+							sa memoreze intr-un vector local fiecare linie pana se ajunge la incheierea paragrafului
+							(linia ""). Odata memorat tot paragraful, se trimite catre worker-ul corespunzator numarul
+							de linii din paragraf urmat de fiecare linie in parte.
+	(master_thread_funct) - In plus, firul de executie desemnat pentru nodul worker "horror", se ocupa si de pastrarea
+							ordinii in care apar paragrafele. Astfel, acesta analizeaza fiecare linie ce contine genul
+							unui paragraf si adauga intr-o coada valoarea.
+	(master_thread_funct) - Dupa ce termina de citit tot fisierul, fiecare fir de executie trimite catre nodul worker
+							desemnat un semnal care ii comunica acestuia ca nu se vor mai trimite paragrafe.
+
+	(main) - Toate nodurile worker de tip MPI apeleaza functia "MPI_workers_main" pasand ca argumente genul 
+			 worker-ului precum si functia care va fi folosita pentru prelucrarea paragrafului (una din functiile
+			 prezente in "processing.h").
+
+	(MPI_workers_main) - Se determina pentru fiecare nod numarul maxim de fire de executie "NR_MAX_THREADS".
+	(MPI_workers_main) - Se pornesc toate cele NR_MAX_THREADS fire de executie, unul rezervat pentru receptarea datelor
+						 de la master, iar restul pentru procesarea datelor primite. Am ales sa folosesc modelul
+						 replicated workers.
+	(MPI_workers_main) - Fiecarui thread i se atribuie functia "workers_thread_func", dandu-se ca argumente:
+						 id-ul thread-ului, genul thread-ului si functia ce va fi apelata pentru 
+						 prelucrarea paragrafelor.
+
+	(workers_thread_func) - In aceasta functie este implementat modelul producator-consumator. Thread-ul folosit pentru
+						 	receptarea datelor de la master este un	producator, iar firele de executie care proceseaza
+						 	datele sunt consumatori.
+
+	(workers_thread_func) - Firul de executie pentru receptarea datelor de la master:
+								- Thread-ul intra intr-o bucla infinita, asteptand sa primeasca ori numarul de linii al
+								  paragrafului, ori semnalul conform caruia nu mai vor mai fi primite paragrafe.
+								- Daca primeste numarul de linii, in continuare astepta sa primeasca toate liniile 
+								  paragrafului, fiecare linie primitia fiind adaugata intr-un vector.
+									- Dupa ce este primit tot paragraful, se impart liniile in grupuri de cate 20 
+									  (ultimul grup poate sa fie mai mic), se adauga intr-o coada, si este trimisa o 
+									  notificare catre workeri.
+									- Dupa ce au fost trimise toate grupurile de linii catre workeri, se astepta pana
+									  cand se primeste o notificare de terminare a prelucrarii pentru fiecare grup de
+									  linii.
+									- Se adauga paragraful prelucrat intr-o coada.
+									- Pasii de mai sus se repeta pana cand se primeste semnalul mentionat.
+								- Daca primeste semnalul, iese din bucla infinita, trimite tutoror worker-ilor un
+								  semnal prin care se comunica faptul nu mai au nimic de lucru, urmand sa trimita 
+								  inapoi toate paragrafele prelucrate, in ordinea in care au fost primite.
+								- Cat timp coada cu paragrafe nu este goala, thread-ul asteapta semnal de la master
+								  pentru a trimite inapoi un paragraf. Acest lucru se repeta pana cand se trimit
+								  inapoi toate paragrafele. Dupa aceea, executia thread-ului ajunge la sfarsit.
+
+	(workers_thread_func) - Firul de executie pentru procesarea datelor:
+								- Se intra intr-o bucla infinita unde workerii asteapta notificari de la producator.
+								  La o notificare primita doar un worker incepe sa lucreze.
+								- Notificarile sunt transmise printr-un semafor. Toti workerii asteapta la semafor,
+								  iar cand este trimisa o notificare (sem_post()), un worker aleator primeste
+								  notificare (sem_wait()) si incepe sa lucreze. Aceasta reprezinta o implementare
+								  de tipul replicated workers.
+								- Dupa ca un worker a preluat notificarea, acesta verifica daca s-a terminat munca
+								  pentru workeri (prin variabila "workersDone"). Daca s-a terminat, se iese din
+								  bucla infinita si se termina executia thread-ului. Altfel, acesta extrage din
+								  coada grupul de linii pe care trebuie sa le prelucreze.
+								- Prelucreaza liniile din paragraf (apeland functia data ca parametru).
+								- Dupa ce termina de prelucrat trimite inapoi o notificare care indica faptul ca
+								  a terminat de prelucrat grupul de linii.
+
+	(main) - Dupa ce toate firele de executie pornite de catre nodul MASTER si-au terminat executia, acesta trimite
+			 semnale catre nodurile worker pentru a primi inapoi paragrafele prelucrate. 
+	(main) - Semnalele sunt trimise in ordinea stabilita de firul de executie desemnat pentru nodul worker "horror" 
+			 (adica ordinea in care au fost citite genurile).
+	(main) - Dupa fiecare semnal trimis, se asteapta primirea paragrafului, urmand ca acesta sa fie scris in fisierul
+			 de output.
+	(main) - Acest proces se reia pana cand sunt scris toate paragrafele prelucrate in fisier.
+
+
+Scalabilitate:
+Am testat tema pe 2 calculatoare. 
+
+	- Primul calculator are o masina virtuala ce are alocate 6 core-uri. Aici
+	  timpul solutiei propuse este aproximativ egal cu timpul algoritmului in
+	  serial (se pot obsterva limitarile masinii virtuale):
+
+	  - Testul 1:
+		~~~~~~~~~~~~~~~ ESTABLISHING BASE TIME ~~~~~~~~~~~~~~
+		Test input1.txt took 0.0015876293182373047 seconds
+		Test input2.txt took 0.10740804672241211 seconds
+		Test input3.txt took 0.3250453472137451 seconds
+		Test input4.txt took 5.819689035415649 seconds
+		Test input5.txt took 8.1553635597229 seconds
+
+		~~~~~~~~~~~~~~~~~~~ RUNNING TESTS ~~~~~~~~~~~~~~~~~~~
+		Test input1.txt took 0.339202880859375 seconds
+		Test input2.txt took 0.4009087085723877 seconds
+		Test input3.txt took 0.6598279476165771 seconds
+		Test input4.txt took 5.3893351554870605 seconds
+		Test input5.txt took 7.672245502471924 seconds
+
+	- Al doilea calculator contine linux instalat si are la dispozitie 4 
+	  core-uri. Aici se poate obsterva o scalabilitate mai buna:
+
+	  - Testul 1:
+	    ~~~~~~~~~~~~~~~ ESTABLISHING BASE TIME ~~~~~~~~~~~~~~
+		Test input1.txt took 0.0014908313751220703 seconds
+		Test input2.txt took 0.10466241836547852 seconds
+		Test input3.txt took 0.3240835666656494 seconds
+		Test input4.txt took 6.055781126022339 seconds
+		Test input5.txt took 9.459078788757324 seconds
+
+		~~~~~~~~~~~~~~~~~~~ RUNNING TESTS ~~~~~~~~~~~~~~~~~~~
+		Test input1.txt took 0.31487369537353516 seconds
+		Test input2.txt took 0.36719822883605957 seconds
+		Test input3.txt took 0.4672379493713379 seconds
+		Test input4.txt took 1.8732874393463135 seconds
+		Test input5.txt took 2.957110643386841 seconds
+
+	  - Testul 2:
+		~~~~~~~~~~~~~~~ ESTABLISHING BASE TIME ~~~~~~~~~~~~~~
+		Test input1.txt took 0.0016367435455322266 seconds
+		Test input2.txt took 0.10433721542358398 seconds
+		Test input3.txt took 0.3273277282714844 seconds
+		Test input4.txt took 5.765873670578003 seconds
+		Test input5.txt took 8.352917194366455 seconds
+
+		~~~~~~~~~~~~~~~~~~~ RUNNING TESTS ~~~~~~~~~~~~~~~~~~~
+		Test input1.txt took 0.3162670135498047 seconds
+		Test input2.txt took 0.3669126033782959 seconds
+		Test input3.txt took 0.5185842514038086 seconds
+		Test input4.txt took 1.7198574542999268 seconds
+		Test input5.txt took 2.3252830505371094 seconds
+
+	  - Testul 3:
+		~~~~~~~~~~~~~~~ ESTABLISHING BASE TIME ~~~~~~~~~~~~~~
+		Test input1.txt took 0.0016012191772460938 seconds
+		Test input2.txt took 0.1039891242980957 seconds
+		Test input3.txt took 0.36131763458251953 seconds
+		Test input4.txt took 6.230554819107056 seconds
+		Test input5.txt took 8.822812795639038 seconds
+
+		~~~~~~~~~~~~~~~~~~~ RUNNING TESTS ~~~~~~~~~~~~~~~~~~~
+		Test input1.txt took 0.3160736560821533 seconds
+		Test input2.txt took 0.3672163486480713 seconds
+		Test input3.txt took 0.41687440872192383 seconds
+		Test input4.txt took 1.7228782176971436 seconds
+		Test input5.txt took 2.3805065155029297 seconds
